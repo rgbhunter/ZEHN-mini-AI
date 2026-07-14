@@ -44,11 +44,9 @@ IS_GEMINI = True
 API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 # Foydalanish uchun modellar ro'yxati (mix va bepul limitlarni tejash uchun)
 API_MODELS = [
-    "gemma-4-31b-it",
-    "gemma-4-26b-a4b-it",
-    "gemini-3.1-flash-lite"
+    "gemma-4-31b-it"
 ]
-logger.info("Tizim Google Gemini API (mix rejim) bilan ishlashga sozlandi...")
+logger.info("Tizim Google Gemini API (Gemma 4 31B rejimi) bilan ishlashga sozlandi...")
 
 
 def query_gemini_sync(api_key, model, messages, system_prompt):
