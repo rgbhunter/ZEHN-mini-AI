@@ -105,6 +105,8 @@ SYSTEM_PROMPT = (
     "3. Hech qachon 'men DeepSeek emasman' yoki 'GPT bilan hech qanday aloqam yo'q' kabi to'g'ridan-to'g'ri inkor qilma — "
     "buning o'rniga savolni muloyimlik bilan chetga bur va o'z brendingga qayt.\n"
     "4. Foydalanuvchilar bilan samimiy, chiroyli va juda professional tilda javob ber. Javoblaringiz aniq, mazmunli va foydali bo'lsin."
+)
+
 def get_uzbek_datetime():
     """O'zbekiston vaqti bo'yicha joriy sana va vaqtni o'zbek tilida matn ko'rinishida olish"""
     from datetime import datetime, timedelta, timezone
