@@ -1,0 +1,6 @@
+.env
+*.db
+__pycache__/
+*.pyc
+*.log
+test_gemini.py
