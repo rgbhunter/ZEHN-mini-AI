@@ -49,7 +49,7 @@ API_MODELS = [
 logger.info("Tizim Google Gemini API (Gemma 4 31B rejimi) bilan ishlashga sozlandi...")
 
 
-def query_gemini_sync(api_key, model, messages, system_prompt):
+def query_gemini_sync(api_key, model, messages, system_prompt, image_b64=None):
     """Google Gemini API ga HTTP POST orqali xavfsiz so'rov yuborish (IPv6 kutishlarsiz)"""
     url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
     headers = {
@@ -57,15 +57,32 @@ def query_gemini_sync(api_key, model, messages, system_prompt):
         "Content-Type": "application/json"
     }
     openai_messages = [{"role": "system", "content": system_prompt}]
-    for msg in messages:
-        openai_messages.append({"role": msg["role"], "content": msg["content"]})
+    
+    # Oxirgi xabarga rasm biriktirilgan bo'lsa, uni multimodal formatda yuboramiz
+    for i, msg in enumerate(messages):
+        if i == len(messages) - 1 and image_b64 and msg["role"] == "user":
+            openai_messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": msg["content"]},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_b64}"
+                        }
+                    }
+                ]
+            })
+        else:
+            openai_messages.append({"role": msg["role"], "content": msg["content"]})
+            
     data = {
         "model": model,
         "messages": openai_messages,
         "max_tokens": 2048,
         "temperature": 0.7
     }
-    response = requests.post(url, json=data, headers=headers, timeout=15.0)
+    response = requests.post(url, json=data, headers=headers, timeout=25.0)
     response.raise_for_status()
     result = response.json()
     return result["choices"][0]["message"]["content"]
@@ -129,6 +146,47 @@ def get_uzbek_datetime():
         weekday_name = weekdays[now.weekday()]
         return f"{now.year}-yil {now.day}-{month_name}, {weekday_name}. Soat: {now.strftime('%H:%M')}"
     except Exception:
+        return ""
+
+
+def transcribe_voice_gemini(api_key, file_bytes, mime_type="audio/ogg"):
+    """Gemini API yordamida ovozni matnga o'tkazish"""
+    import base64
+    import requests
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    b64_data = base64.b64encode(file_bytes).decode("utf-8")
+    data = {
+        "contents": [{
+            "parts": [
+                {"inline_data": {"mime_type": mime_type, "data": b64_data}},
+                {"text": "Ushbu ovozli xabarni transkript qil (o'zbek tiliga). Faqat aytilgan matnni qaytar, hech qanday sharh qo'shma."}
+            ]
+        }]
+    }
+    try:
+        r = requests.post(url, json=data, headers=headers, timeout=20)
+        r.raise_for_status()
+        res = r.json()
+        text = res["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return text
+    except Exception as e:
+        logger.error(f"Voice transcription error: {e}")
+        return ""
+
+
+def extract_text_from_pdf(pdf_bytes):
+    """PDF fayldan matnni ajratib olish"""
+    import io
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        text = ""
+        for page in reader.pages[:10]:  # Dastlabki 10 sahifa
+            text += page.extract_text() or ""
+        return text
+    except Exception as e:
+        logger.error(f"PDF extract error: {e}")
         return ""
 
 
@@ -424,37 +482,98 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
 
-    # 4. Admin kirishi va holatini tekshirish (matn, rasm va boshqa barcha fayllarni broadcast qila olishi uchun)
+    # 4. Admin kirishi va holatini tekshirish
     if chat_id == ADMIN_CHAT_ID:
         is_processed = await process_admin_input(update, context)
         if is_processed:
             return
 
-    # 5. Agar oddiy foydalanuvchi matn bo'lmagan xabar yuborsa
-    if not update.message.text:
-        unsupported_message = (
-            "Kechirasiz, ZEHN mini hozircha faqat matnli xabarlar bilan ishlay oladi. ✍️\n\n"
-            "Rasmlarni, ovozli xabarlarni yoki boshqa turdagi fayllarni ko'rish va tahlil qilish imkoniyati hozircha mavjud emas. "
-            "Iltimos, savolingizni matn ko'rinishida yuboring!"
-        )
-        await update.message.reply_text(unsupported_message)
+    # O'zgaruvchilarni tayyorlash
+    user_text = ""
+    image_b64 = None
+    
+    # A. Rasm (Photo) yuborilganda
+    if update.message.photo:
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        try:
+            photo_file = await update.message.photo[-1].get_file()
+            photo_bytes = await photo_file.download_as_bytearray()
+            import base64
+            image_b64 = base64.b64encode(photo_bytes).decode("utf-8")
+            user_text = update.message.caption or "Ushbu rasmni tahlil qilib ber."
+        except Exception as e:
+            logger.error(f"Photo processing error: {e}")
+            await update.message.reply_text("Rasmni yuklab olishda xatolik yuz berdi.")
+            return
+
+    # B. Ovozli xabar (Voice yoki Audio) yuborilganda
+    elif update.message.voice or update.message.audio:
+        status_msg = await update.message.reply_text("🎙 Ovozli xabarni matnga o'tkazyapman...")
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        try:
+            audio_file = await (update.message.voice or update.message.audio).get_file()
+            audio_bytes = await audio_file.download_as_bytearray()
+            transcribed_text = transcribe_voice_gemini(OPENMODEL_API_KEY, audio_bytes)
+            await status_msg.delete()
+            if not transcribed_text:
+                await update.message.reply_text("Kechirasiz, ovozli xabarni eshita olmadim. Iltimos, qaytadan tushunarliroq gapiring.")
+                return
+            user_text = transcribed_text
+            await update.message.reply_text(f"📝 **Sizning ovozingiz matni:**\n_{user_text}_", parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Voice processing error: {e}")
+            await status_msg.delete()
+            await update.message.reply_text("Ovozli xabarni tahlil qilishda xatolik yuz berdi.")
+            return
+
+    # C. Hujjat (Document) yuborilganda
+    elif update.message.document:
+        status_msg = await update.message.reply_text("📄 Hujjat matni o'qilmoqda...")
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        try:
+            doc = update.message.document
+            file_name = doc.file_name.lower()
+            doc_file = await doc.get_file()
+            doc_bytes = await doc_file.download_as_bytearray()
+            await status_msg.delete()
+            
+            extracted_text = ""
+            if file_name.endswith(".pdf"):
+                extracted_text = extract_text_from_pdf(doc_bytes)
+            elif file_name.endswith((".txt", ".py", ".json", ".csv", ".html", ".css", ".js")):
+                extracted_text = doc_bytes.decode("utf-8", errors="ignore")
+            
+            if not extracted_text:
+                await update.message.reply_text("Kechirasiz, ushbu hujjatdan matn ajratib bo'lmadi. (Faqat PDF va matnli fayllar qo'llab-quvvatlanadi).")
+                return
+                
+            caption = update.message.caption or "Ushbu hujjatni tahlil qilib ber."
+            user_text = f"[Hujjat nomi: {doc.file_name}]\n[Hujjat matni:\n{extracted_text[:4000]}]\n\nSavol: {caption}"
+        except Exception as e:
+            logger.error(f"Document processing error: {e}")
+            await status_msg.delete()
+            await update.message.reply_text("Hujjatni qayta ishlashda xatolik yuz berdi.")
+            return
+
+    # D. Matnli xabar yuborilganda
+    elif update.message.text:
+        user_text = update.message.text
+        
+    else:
+        await update.message.reply_text("Kechirasiz, ushbu turdagi xabarni qabul qila olmayman. Iltimos, matn, rasm, ovozli xabar yoki hujjat yuboring!")
         return
 
-    user_text = update.message.text
-
-    # 6. Foydalanuvchi xabarini tarixga saqlash
+    # Foydalanuvchi xabarini tarixga saqlash
     database.save_chat_message(chat_id, "user", user_text)
 
-    # 7. Bazadan chat tarixini yuklash (oxirgi 10 ta xabar)
+    # Bazadan chat tarixini yuklash (oxirgi 10 ta xabar)
     history = database.get_chat_history(chat_id, limit=10)
 
-    # 8. Foydalanuvchiga bot yozayotganini ko'rsatish (typing... indicator)
+    # Foydalanuvchiga bot yozayotganini ko'rsatish (typing... indicator)
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     try:
         if IS_GEMINI:
-            # Modellarni aralashtiramiz (random mix) va aylanib chiqamiz
-            # Agar bittasi xatolik bersa (masalan, 429), keyingisiga o'tadi
             shuffled_models = API_MODELS.copy()
             random.shuffle(shuffled_models)
             
@@ -474,7 +593,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         api_key=OPENMODEL_API_KEY,
                         model=model_name,
                         messages=history,
-                        system_prompt=dynamic_system_prompt
+                        system_prompt=dynamic_system_prompt,
+                        image_b64=image_b64
                     )
                     if raw_response:
                         assistant_response = re.sub(r'<thought>.*?</thought>', '', raw_response, flags=re.DOTALL).strip()
@@ -523,7 +643,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             api_key=OPENMODEL_API_KEY,
                             model=model_name,
                             messages=temp_history,
-                            system_prompt=dynamic_system_prompt
+                            system_prompt=dynamic_system_prompt,
+                            image_b64=image_b64
                         )
                         if raw_response:
                             assistant_response = re.sub(r'<thought>.*?</thought>', '', raw_response, flags=re.DOTALL).strip()
