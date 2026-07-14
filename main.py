@@ -105,7 +105,26 @@ SYSTEM_PROMPT = (
     "3. Hech qachon 'men DeepSeek emasman' yoki 'GPT bilan hech qanday aloqam yo'q' kabi to'g'ridan-to'g'ri inkor qilma — "
     "buning o'rniga savolni muloyimlik bilan chetga bur va o'z brendingga qayt.\n"
     "4. Foydalanuvchilar bilan samimiy, chiroyli va juda professional tilda javob ber. Javoblaringiz aniq, mazmunli va foydali bo'lsin."
-)
+def get_uzbek_datetime():
+    """O'zbekiston vaqti bo'yicha joriy sana va vaqtni o'zbek tilida matn ko'rinishida olish"""
+    from datetime import datetime, timedelta, timezone
+    try:
+        # UTC+5 (O'zbekiston vaqti)
+        now = datetime.now(timezone(timedelta(hours=5)))
+        months = {
+            1: "yanvar", 2: "fevral", 3: "mart", 4: "aprel", 5: "may", 6: "iyun",
+            7: "iyul", 8: "avgust", 9: "sentabr", 10: "oktabr", 11: "noyabr", 12: "dekabr"
+        }
+        weekdays = {
+            0: "dushanba", 1: "seshanba", 2: "chorshanba", 3: "payshanba",
+            4: "juma", 5: "shanba", 6: "yakshanba"
+        }
+        month_name = months[now.month]
+        weekday_name = weekdays[now.weekday()]
+        return f"{now.year}-yil {now.day}-{month_name}, {weekday_name}. Soat: {now.strftime('%H:%M')}"
+    except Exception:
+        return ""
+
 
 def get_admin_markup():
     """Admin menyusi uchun inline klaviatura yaratish"""
@@ -399,6 +418,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             assistant_response = None
             last_error = None
             
+            # Dinamik ravishda joriy vaqtni system promptga qo'shamiz
+            current_dt = get_uzbek_datetime()
+            dynamic_system_prompt = SYSTEM_PROMPT
+            if current_dt:
+                dynamic_system_prompt = f"{SYSTEM_PROMPT}\n\nJORIY SANA VA VAQT: Bugun {current_dt}."
+            
             for model_name in shuffled_models:
                 try:
                     raw_response = await asyncio.to_thread(
@@ -406,7 +431,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         api_key=OPENMODEL_API_KEY,
                         model=model_name,
                         messages=history,
-                        system_prompt=SYSTEM_PROMPT
+                        system_prompt=dynamic_system_prompt
                     )
                     if raw_response:
                         # <thought>...</thought> teglarini va ularning ichidagi matnni tozalash
