@@ -104,7 +104,11 @@ SYSTEM_PROMPT = (
     "nimalarga yordam berishing mumkinligini gapir, texnik kelib chiqishingni emas.\n"
     "3. Hech qachon 'men DeepSeek emasman' yoki 'GPT bilan hech qanday aloqam yo'q' kabi to'g'ridan-to'g'ri inkor qilma — "
     "buning o'rniga savolni muloyimlik bilan chetga bur va o'z brendingga qayt.\n"
-    "4. Foydalanuvchilar bilan samimiy, chiroyli va juda professional tilda javob ber. Javoblaringiz aniq, mazmunli va foydali bo'lsin."
+    "4. Foydalanuvchilar bilan samimiy, chiroyli va juda professional tilda javob ber. Javoblaringiz aniq, mazmunli va foydali bo'lsin.\n\n"
+    "INTERNET QIDIRUV QOIDASI:\n"
+    "Agar foydalanuvchi bergan savolga javob berish uchun senga internetdan real vaqtdagi ma'lumotlar kerak bo'lsa (masalan: bugungi ob-havo, valyuta kursi, yangiliklar, joriy voqealar va h.k.), "
+    "javobingda FAQAT va FAQAT `[SEARCH: qidiruv so'zi]` ko'rinishida yoz. Hech qanday qo'shimcha so'z qo'shma. Masalan: `[SEARCH: dollar kursi bugun O'zbekiston]`.\n"
+    "Agar internetdan qidirish shart bo'lmasa, odatdagidek javob ber."
 )
 
 def get_uzbek_datetime():
@@ -126,6 +130,43 @@ def get_uzbek_datetime():
         return f"{now.year}-yil {now.day}-{month_name}, {weekday_name}. Soat: {now.strftime('%H:%M')}"
     except Exception:
         return ""
+
+
+def search_web(query, max_results=3):
+    """DuckDuckGo orqali internetdan qidirish"""
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            results = [r for r in ddgs.text(query, max_results=max_results)]
+            return results
+    except Exception as e:
+        logger.error(f"DDG search package error: {e}. Fallback-ga o'tamiz...")
+        return search_ddg_fallback(query)
+
+
+def search_ddg_fallback(query):
+    """DuckDuckGo Lite-dan HTML parsing orqali zaxira qidiruv"""
+    import requests
+    import re
+    from urllib.parse import quote
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        
+        snippets = re.findall(r'<a class="result__snippet"[^>]*>(.*?)</a>', r.text, re.DOTALL)
+        titles = re.findall(r'<a class="result__url"[^>]*>(.*?)</a>', r.text, re.DOTALL)
+        
+        results = []
+        for i in range(min(3, len(snippets))):
+            title = re.sub(r'<[^>]+>', '', titles[i]).strip() if i < len(titles) else "Qidiruv natijasi"
+            body = re.sub(r'<[^>]+>', '', snippets[i]).strip()
+            results.append({"title": title, "body": body})
+        return results
+    except Exception as e:
+        logger.error(f"Fallback qidiruvda xatolik: {e}")
+        return []
 
 
 def get_admin_markup():
@@ -436,17 +477,65 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         system_prompt=dynamic_system_prompt
                     )
                     if raw_response:
-                        # <thought>...</thought> teglarini va ularning ichidagi matnni tozalash
                         assistant_response = re.sub(r'<thought>.*?</thought>', '', raw_response, flags=re.DOTALL).strip()
-                        logger.info(f"So'rov muvaffaqiyatli bajarildi. Model: {model_name}")
+                        logger.info(f"1-Bosqich muvaffaqiyatli bajarildi. Model: {model_name}")
                         break
                 except Exception as e:
-                    logger.warning(f"{model_name} modelida xatolik yuz berdi: {e}. Keyingisiga urinib ko'ramiz...")
+                    logger.warning(f"1-Bosqichda {model_name} modelida xatolik yuz berdi: {e}. Keyingisiga urinib ko'ramiz...")
                     last_error = e
                     continue
             
             if not assistant_response:
                 raise last_error or Exception("Barcha modellar so'rovni qayta ishlashdan bosh tortdi.")
+
+            # Qidiruv so'rovini tekshiramiz
+            search_match = re.search(r'\[SEARCH:\s*(.*?)\]', assistant_response)
+            if search_match:
+                query = search_match.group(1).strip()
+                logger.info(f"Model internetdan qidiruv so'radi: '{query}'")
+                
+                # Typing ko'rsatkichini yangilaymiz
+                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+                
+                # Qidiruvni bajaramiz
+                search_results = await asyncio.to_thread(search_web, query)
+                
+                # Qidiruv natijalarini formatlaymiz
+                if search_results:
+                    search_text = "\n".join([f"- {r.get('title', '')}: {r.get('body', '')}" for r in search_results])
+                else:
+                    search_text = "Hech qanday ma'lumot topilmadi."
+                    
+                logger.info(f"Qidiruv natijalari olindi ({len(search_results)} ta)")
+                
+                # Modelga qidiruv natijalarini taqdim etamiz va qayta so'raymiz
+                temp_history = history.copy()
+                temp_history.append({
+                    "role": "user",
+                    "content": f"[Tizim ko'rsatmasi: Internet qidiruv natijalari quyidagicha:\n{search_text}\n\nIltimos, ushbu ma'lumotlardan foydalanib foydalanuvchining savoliga javob ber.]"
+                })
+                
+                assistant_response = None
+                for model_name in shuffled_models:
+                    try:
+                        raw_response = await asyncio.to_thread(
+                            query_gemini_sync,
+                            api_key=OPENMODEL_API_KEY,
+                            model=model_name,
+                            messages=temp_history,
+                            system_prompt=dynamic_system_prompt
+                        )
+                        if raw_response:
+                            assistant_response = re.sub(r'<thought>.*?</thought>', '', raw_response, flags=re.DOTALL).strip()
+                            logger.info(f"2-Bosqich muvaffaqiyatli bajarildi. Model: {model_name}")
+                            break
+                    except Exception as e:
+                        logger.warning(f"2-Bosqichda {model_name} modelida xatolik yuz berdi: {e}")
+                        last_error = e
+                        continue
+                        
+                if not assistant_response:
+                    raise last_error or Exception("2-Bosqichda barcha modellar xatolik berdi.")
         else:
             assistant_response = "Kechirasiz, noto'g'ri API sozlamalari aniqlandi."
         
